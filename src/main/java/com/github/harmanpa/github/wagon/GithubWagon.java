@@ -13,6 +13,8 @@ import org.apache.maven.wagon.ResourceDoesNotExistException;
 import org.apache.maven.wagon.TransferFailedException;
 import org.apache.maven.wagon.authentication.AuthenticationException;
 import org.apache.maven.wagon.authorization.AuthorizationException;
+import org.apache.maven.wagon.events.TransferEvent;
+import org.apache.maven.wagon.resource.Resource;
 import org.codehaus.plexus.util.Base64;
 import org.eclipse.egit.github.core.Blob;
 import org.eclipse.egit.github.core.IRepositoryIdProvider;
@@ -29,6 +31,17 @@ import org.eclipse.egit.github.core.service.RepositoryService;
 public class GithubWagon extends AbstractWagon {
 
     @Override
+    public boolean resourceExists(String resourceName) throws TransferFailedException, AuthorizationException {
+        fireSessionDebug("Checking existence of " + resourceName);
+        try {
+            transfer(resourceName, null, true);
+            return true;
+        } catch (ResourceDoesNotExistException ex) {
+            return false;
+        }
+    }
+
+    @Override
     protected void openConnectionInternal() throws ConnectionException, AuthenticationException {
 
     }
@@ -39,30 +52,26 @@ public class GithubWagon extends AbstractWagon {
 
     @Override
     public void get(String string, File file) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        transfer(string, file, false);
+    }
+
+    private void transfer(String string, File file, boolean dryRun) throws TransferFailedException, ResourceDoesNotExistException, AuthorizationException {
+        Resource resource = new Resource(string);
+        if (!dryRun) {
+            fireGetInitiated(resource, file);
+            fireGetStarted(resource, file);
+        }
         try {
             // Parse the URL
             URI uri = new URI(getRepository().getUrl());
             String owner = uri.getHost();
             String path = uri.getPath();
-            String[] pathElements = path.split("/");
-            String repo = null;
-            String branch = null;
-            int i = 0;
-            for (String element : pathElements) {
-                if (!element.trim().isEmpty()) {
-                    switch (i) {
-                        case 0:
-                            repo = element.trim();
-                            i++;
-                            break;
-                        case 1:
-                            branch = element.trim();
-                            i++;
-                            break;
-                        default:
-                    }
-                }
+            String[] pathElements = Iterables.toArray(Splitter.on('/').omitEmptyStrings().split(path), String.class);
+            if (pathElements.length == 0 || pathElements.length > 2) {
+                throw new ResourceDoesNotExistException("Invalid repository path " + path);
             }
+            String repo = pathElements[0];
+            String branch = pathElements.length == 2 ? pathElements[1] : null;
             GitHubClient client = new GitHubClient();
             client.setCredentials(getAuthenticationInfo().getUserName(), getAuthenticationInfo().getPassword());
             RepositoryService repositoryService = new RepositoryService(client);
@@ -78,10 +87,15 @@ public class GithubWagon extends AbstractWagon {
             } else {
                 data = blob.getContent().getBytes();
             }
-            Files.write(data, file);
+            if (!dryRun) {
+                Files.write(data, file);
+                fireGetCompleted(resource, file);
+            }
         } catch (URISyntaxException ex) {
+            fireTransferError(resource, ex, TransferEvent.REQUEST_GET);
             throw new ResourceDoesNotExistException("Could not parse repository URL");
         } catch (IOException ex) {
+            fireTransferError(resource, ex, TransferEvent.REQUEST_GET);
             throw new TransferFailedException("Error during transfer", ex);
         }
     }
